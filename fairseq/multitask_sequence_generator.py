@@ -14,26 +14,27 @@ from fairseq.models import FairseqIncrementalDecoder
 
 HIDDEN_SIZE = 512
 
-class SequenceGenerator(object):
+
+class MultitaskSequenceGenerator(object):
     def __init__(
-        self,
-        tgt_dict,
-        beam_size=1,
-        max_len_a=0,
-        max_len_b=200,
-        min_len=1,
-        stop_early=True,
-        normalize_scores=True,
-        len_penalty=1.,
-        unk_penalty=0.,
-        retain_dropout=False,
-        sampling=False,
-        sampling_topk=-1,
-        sampling_temperature=1.,
-        diverse_beam_groups=-1,
-        diverse_beam_strength=0.5,
-        match_source_len=False,
-        no_repeat_ngram_size=0,
+            self,
+            tgt_dict,
+            beam_size=1,
+            max_len_a=0,
+            max_len_b=200,
+            min_len=1,
+            stop_early=True,
+            normalize_scores=True,
+            len_penalty=1.,
+            unk_penalty=0.,
+            retain_dropout=False,
+            sampling=False,
+            sampling_topk=-1,
+            sampling_temperature=1.,
+            diverse_beam_groups=-1,
+            diverse_beam_strength=0.5,
+            match_source_len=False,
+            no_repeat_ngram_size=0,
     ):
         """Generates translations of a given source sentence.
 
@@ -100,12 +101,12 @@ class SequenceGenerator(object):
 
     @torch.no_grad()
     def generate(
-        self,
-        models,
-        sample,
-        prefix_tokens=None,
-        bos_token=None,
-        **kwargs
+            self,
+            models,
+            sample,
+            prefix_tokens=None,
+            bos_token=None,
+            **kwargs
     ):
         """Generate a batch of translations.
 
@@ -226,13 +227,13 @@ class SequenceGenerator(object):
             tokens_clone[:, step] = self.eos
             clean_decoder_state_clone = clean_decoder_state.index_select(0, bbsz_idx)
             # [batch_size * beam_size, steps, embed_size]
-            clean_decoder_state_clone = clean_decoder_state_clone[:, 1:step+2]
+            clean_decoder_state_clone = clean_decoder_state_clone[:, 1:step + 2]
             clean_decoder_state_clone[:, step] = decoder_out_linear.index_select(0, bbsz_idx)
 
-            attn_clone = attn.index_select(0, bbsz_idx)[:, :, 1:step+2] if attn is not None else None
+            attn_clone = attn.index_select(0, bbsz_idx)[:, :, 1:step + 2] if attn is not None else None
 
             # compute scores per token position
-            pos_scores = scores.index_select(0, bbsz_idx)[:, :step+1]
+            pos_scores = scores.index_select(0, bbsz_idx)[:, :step + 1]
             pos_scores[:, step] = eos_scores
             # convert from cumulative to per-position scores
             pos_scores[:, 1:] = pos_scores[:, 1:] - pos_scores[:, :-1]
@@ -321,7 +322,7 @@ class SequenceGenerator(object):
             lprobs[:, self.pad] = -math.inf  # never select pad
             lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
 
-            #TODO, it is assumed to be 0
+            # TODO, it is assumed to be 0
             if self.no_repeat_ngram_size > 0:
                 # for each beam and batch sentence, generate a list of previous ngrams
                 gen_ngrams = [{} for bbsz_idx in range(bsz * beam_size)]
@@ -329,7 +330,7 @@ class SequenceGenerator(object):
                     gen_tokens = tokens[bbsz_idx].tolist()
                     for ngram in zip(*[gen_tokens[i:] for i in range(self.no_repeat_ngram_size)]):
                         gen_ngrams[bbsz_idx][tuple(ngram[:-1])] = \
-                                gen_ngrams[bbsz_idx].get(tuple(ngram[:-1]), []) + [ngram[-1]]
+                            gen_ngrams[bbsz_idx].get(tuple(ngram[:-1]), []) + [ngram[-1]]
 
             # Record attention scores
             if avg_attn_scores is not None:
