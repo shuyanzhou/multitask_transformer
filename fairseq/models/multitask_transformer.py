@@ -23,7 +23,7 @@ from . import (
 )
 
 
-# @register_model('multitask_transformer')
+@register_model('multitask_transformer')
 class MultitaskTransformerModel(BaseFairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
@@ -47,14 +47,23 @@ class MultitaskTransformerModel(BaseFairseqModel):
         self.decoder_clean = decoder_clean
         self.decoder_translation = decoder_translation
 
-    def forward(self, src_tokens, src_lengths, prev_clean_output_tokens, prev_trans_output_tokens):
+    def forward(self, src_tokens, src_lengths, prev_clean_output_tokens, tgt_clean_mask, prev_trans_output_tokens):
         encoder_out = self.encoder(src_tokens, src_lengths)
         decoder_clean_out = self.decoder_clean(prev_clean_output_tokens, encoder_out)
         decoder_out = dict()
         decoder_out['decoder_out'] = decoder_clean_out[1]['before_linear']
-        decoder_out['decoder_padding_mask'] = None
+        decoder_out['decoder_padding_mask'] = tgt_clean_mask
         final_decoder_out = self.decoder_translation(prev_trans_output_tokens, encoder_out, decoder_out)
-        return final_decoder_out
+        return decoder_clean_out, final_decoder_out
+
+    def get_normalized_probs(self, net_output, log_probs, sample=None):
+        log_probs = (self.decoder_clean.get_normalized_probs(net_output[0], log_probs, sample),
+                     self.decoder_translation.get_normalized_probs(net_output[1], log_probs, sample))
+        return log_probs
+
+    def get_targets(self, sample, net_output):
+        """Get targets from either the sample or the net's output."""
+        return sample['target_clean'], sample['target_trans']
 
     @staticmethod
     def add_args(parser):
@@ -155,8 +164,8 @@ class MultitaskTransformerModel(BaseFairseqModel):
             )
 
         encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
-        clean_decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        translation_decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
+        clean_decoder = TransformerDecoder(args, src_dict, encoder_embed_tokens)  # clean uses encoder
+        translation_decoder = TransformerTranslationDecoder(args, tgt_dict, decoder_embed_tokens)
         return MultitaskTransformerModel(encoder, clean_decoder, translation_decoder)
 
 
@@ -571,13 +580,14 @@ class TransformerTranslationDecoder(FairseqIncrementalDecoder):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
-        attn = None
+        encoder_attn = None
+        decoder_attn = None
 
         inner_states = [x]
 
         # decoder layers
         for layer in self.layers:
-            x, attn = layer(
+            x, encoder_attn, decoder_attn = layer(
                 x,
                 encoder_out['encoder_out'] if encoder_out is not None else None,
                 encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
@@ -604,7 +614,7 @@ class TransformerTranslationDecoder(FairseqIncrementalDecoder):
             else:
                 x = F.linear(x, self.embed_out)
 
-        return x, {'attn': attn, 'inner_states': inner_states}
+        return x, {'attn': {'encoder': encoder_attn, 'decoder': decoder_attn}, 'inner_states': inner_states}
 
     def max_positions(self):
         """Maximum output length supported by the decoder."""
@@ -905,6 +915,7 @@ class TransformerTranslationDecoderLayer(nn.Module):
                 dropout=args.attention_dropout,
             )
             self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
+            self.two_attn_linear = Linear(self.embed_dim * 2, self.embed_dim)
 
         self.fc1 = Linear(self.embed_dim, args.decoder_ffn_embed_dim)
         self.fc2 = Linear(args.decoder_ffn_embed_dim, self.embed_dim)
@@ -980,6 +991,7 @@ class TransformerTranslationDecoderLayer(nn.Module):
                 need_weights=(not self.training and self.need_attn),
             )
             x = torch.cat([x_encoder, x_decoder], dim=-1)
+            x = self.two_attn_linear(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
             x = residual + x
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, after=True)
@@ -1038,34 +1050,34 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, learned=Fals
     return m
 
 
-# @register_model_architecture('transformer', 'transformer')
-# def base_architecture(args):
-#     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
-#     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-#     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 2048)
-#     args.encoder_layers = getattr(args, 'encoder_layers', 6)
-#     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 8)
-#     args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
-#     args.encoder_learned_pos = getattr(args, 'encoder_learned_pos', False)
-#     args.decoder_embed_path = getattr(args, 'decoder_embed_path', None)
-#     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', args.encoder_embed_dim)
-#     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', args.encoder_ffn_embed_dim)
-#     args.decoder_layers = getattr(args, 'decoder_layers', 6)
-#     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
-#     args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', False)
-#     args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
-#     args.attention_dropout = getattr(args, 'attention_dropout', 0.)
-#     args.relu_dropout = getattr(args, 'relu_dropout', 0.)
-#     args.dropout = getattr(args, 'dropout', 0.1)
-#     args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
-#     args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
-#     args.share_decoder_input_output_embed = getattr(args, 'share_decoder_input_output_embed', False)
-#     args.share_all_embeddings = getattr(args, 'share_all_embeddings', False)
-#     args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
-#     args.adaptive_input = getattr(args, 'adaptive_input', False)
-#
-#     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
-#     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
+@register_model_architecture('multitask_transformer', 'multitask_transformer')
+def base_architecture(args):
+    args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
+    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
+    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 2048)
+    args.encoder_layers = getattr(args, 'encoder_layers', 6)
+    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 8)
+    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
+    args.encoder_learned_pos = getattr(args, 'encoder_learned_pos', False)
+    args.decoder_embed_path = getattr(args, 'decoder_embed_path', None)
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', args.encoder_embed_dim)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', args.encoder_ffn_embed_dim)
+    args.decoder_layers = getattr(args, 'decoder_layers', 6)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
+    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', False)
+    args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.)
+    args.dropout = getattr(args, 'dropout', 0.1)
+    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
+    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
+    args.share_decoder_input_output_embed = getattr(args, 'share_decoder_input_output_embed', False)
+    args.share_all_embeddings = getattr(args, 'share_all_embeddings', False)
+    args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
+    args.adaptive_input = getattr(args, 'adaptive_input', False)
+
+    args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
+    args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 #
 #
 # @register_model_architecture('transformer', 'transformer_iwslt_de_en')
