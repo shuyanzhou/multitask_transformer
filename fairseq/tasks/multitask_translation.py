@@ -17,6 +17,7 @@ from fairseq.data import (
     IndexedDataset,
     IndexedRawTextDataset,
     LanguagePairDataset,
+    LanguageTripleDataset
 )
 
 from . import FairseqTask, register_task
@@ -91,6 +92,7 @@ class MultitaskTranslationTask(FairseqTask):
         super().__init__(args)
         self.src_dict = src_dict
         self.tgt_dict = tgt_dict
+        self.translation_datasets = {}
 
     @classmethod
     def setup_task(cls, args, **kwargs):
@@ -145,7 +147,8 @@ class MultitaskTranslationTask(FairseqTask):
             return None
 
         src_datasets = []
-        tgt_datasets = []
+        tgt_clean_datasets = []
+        tgt_translation_datasets = []
 
         data_paths = self.args.data
 
@@ -157,7 +160,9 @@ class MultitaskTranslationTask(FairseqTask):
                 src, tgt = self.args.source_lang, self.args.target_lang
                 if split_exists(split_k, src, tgt, src, data_path):
                     prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, src, tgt))
+                    prefix_noisy = os.path.join(data_path, '{}.noisy-{}-{}.'.format(split_k, src, src))
                 elif split_exists(split_k, tgt, src, src, data_path):
+                    raise NotImplementedError
                     prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, tgt, src))
                 else:
                     if k > 0 or dk > 0:
@@ -165,32 +170,37 @@ class MultitaskTranslationTask(FairseqTask):
                     else:
                         raise FileNotFoundError('Dataset not found: {} ({})'.format(split, data_path))
 
-                src_datasets.append(indexed_dataset(prefix + src, self.src_dict))
-                tgt_datasets.append(indexed_dataset(prefix + tgt, self.tgt_dict))
+                src_datasets.append(indexed_dataset(prefix_noisy + 'noisy-' + src, self.src_dict))
+                tgt_clean_datasets.append(indexed_dataset(prefix + src, self.src_dict))
+                tgt_translation_datasets.append(indexed_dataset(prefix + tgt, self.tgt_dict))
 
                 print('| {} {} {} examples'.format(data_path, split_k, len(src_datasets[-1])))
 
                 if not combine:
                     break
 
-        assert len(src_datasets) == len(tgt_datasets)
+        assert len(src_datasets) == len(tgt_clean_datasets)
+        assert len(src_datasets) == len(tgt_translation_datasets)
 
         if len(src_datasets) == 1:
-            src_dataset, tgt_dataset = src_datasets[0], tgt_datasets[0]
+            src_dataset, tgt_clean_dataset, tgt_trans_dataset = src_datasets[0], \
+                                                                tgt_clean_datasets[0], \
+                                                                tgt_translation_datasets[0]
         else:
+            raise NotImplementedError
             sample_ratios = [1] * len(src_datasets)
             sample_ratios[0] = self.args.upsample_primary
             src_dataset = ConcatDataset(src_datasets, sample_ratios)
             tgt_dataset = ConcatDataset(tgt_datasets, sample_ratios)
 
-        self.datasets[split] = LanguagePairDataset(
+        self.datasets[split] = LanguageTripleDataset(
             src_dataset, src_dataset.sizes, self.src_dict,
-            tgt_dataset, tgt_dataset.sizes, self.tgt_dict,
+            tgt_clean_dataset, tgt_clean_dataset.sizes, self.src_dict,
+            tgt_trans_dataset, tgt_trans_dataset.sizes, self.tgt_dict,
             left_pad_source=self.args.left_pad_source,
             left_pad_target=self.args.left_pad_target,
             max_source_positions=self.args.max_source_positions,
-            max_target_positions=self.args.max_target_positions,
-        )
+            max_target_positions=self.args.max_target_positions)
 
     def build_dataset_for_inference(self, src_tokens, src_lengths):
         return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary)

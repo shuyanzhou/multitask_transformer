@@ -18,6 +18,7 @@ from .round_robin_zip_datasets import RoundRobinZipDatasets
 from .token_block_dataset import TokenBlockDataset
 from .transform_eos_dataset import TransformEosDataset
 from .transform_eos_lang_pair_dataset import TransformEosLangPairDataset
+from .language_triple_dataset import LanguageTripleDataset
 
 from .iterators import (
     CountingIterator,
@@ -38,6 +39,7 @@ __all__ = [
     'IndexedDataset',
     'IndexedRawTextDataset',
     'LanguagePairDataset',
+    'LanguageTripleDataset',
     'LMContextWindowDataset',
     'MonolingualDataset',
     'NoisingDataset',
