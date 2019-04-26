@@ -124,7 +124,7 @@ class MultitaskSequenceGenerator(object):
         # separately, but SequenceGenerator directly calls model.encoder
         encoder_input = {
             k: v for k, v in sample['net_input'].items()
-            if k != 'prev_output_tokens'
+            if k != 'prev_clean_output_tokens' and k != 'prev_trans_output_tokens' and k != 'tgt_clean_mask'
         }
 
         src_tokens = encoder_input['src_tokens']
@@ -566,7 +566,8 @@ class EnsembleModel(torch.nn.Module):
         super().__init__()
         self.models = torch.nn.ModuleList(models)
         self.incremental_states = None
-        if all(isinstance(m.decoder, FairseqIncrementalDecoder) for m in models):
+        if all(isinstance(m.decoder_clean, FairseqIncrementalDecoder) for m in models) and \
+                all(isinstance(m.decoder_translation, FairseqIncrementalDecoder) for m in models):
             self.incremental_states = {m: {} for m in models}
 
     def has_encoder(self):
@@ -611,9 +612,10 @@ class EnsembleModel(torch.nn.Module):
     def _decode_one(self, tokens, model, encoder_out, incremental_states, log_probs):
         # token = [bsz * beam_size, max_len + 2]
         if self.incremental_states is not None:
-            decoder_out = list(model.decoder(tokens, encoder_out, incremental_state=self.incremental_states[model]))
+            decoder_out = list(
+                model.decoder_clean(tokens, encoder_out, incremental_state=self.incremental_states[model]))
         else:
-            decoder_out = list(model.decoder(tokens, encoder_out))
+            decoder_out = list(model.decoder_clean(tokens, encoder_out))
         decoder_out[0] = decoder_out[0][:, -1:, :]
         # [bsz * beam_size, 1, embed_size] 1 because incremental is not None
         # meanwhile, it will update incremental state
@@ -626,7 +628,7 @@ class EnsembleModel(torch.nn.Module):
             if type(attn) is dict:
                 attn = attn['attn']
             attn = attn[:, -1, :]
-        probs = model.get_normalized_probs(decoder_out, log_probs=log_probs)
+        probs = model.decoder_clean.get_normalized_probs(decoder_out, log_probs=log_probs, sample=None)
         probs = probs[:, -1, :]
         return probs, attn, decoder_out_linear
 
@@ -642,4 +644,4 @@ class EnsembleModel(torch.nn.Module):
         if self.incremental_states is None:
             return
         for model in self.models:
-            model.decoder.reorder_incremental_state(self.incremental_states[model], new_order)
+            model.decoder_clean.reorder_incremental_state(self.incremental_states[model], new_order)

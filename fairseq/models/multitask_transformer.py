@@ -65,6 +65,10 @@ class MultitaskTransformerModel(BaseFairseqModel):
         """Get targets from either the sample or the net's output."""
         return sample['target_clean'], sample['target_trans']
 
+    def max_decoder_positions(self):
+        """Maximum length supported by the decoder."""
+        return min(self.decoder_clean.max_positions(), self.decoder_translation.max_positions())
+
     @staticmethod
     def add_args(parser):
         """Add model-specific arguments to the parser."""
