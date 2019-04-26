@@ -160,7 +160,9 @@ class MultitaskTranslationTask(FairseqTask):
                 src, tgt = self.args.source_lang, self.args.target_lang
                 if split_exists(split_k, src, tgt, src, data_path):
                     prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, src, tgt))
+                    prefix_noisy = os.path.join(data_path, '{}.noisy-{}-{}.'.format(split_k, src, src))
                 elif split_exists(split_k, tgt, src, src, data_path):
+                    raise NotImplementedError
                     prefix = os.path.join(data_path, '{}.{}-{}.'.format(split_k, tgt, src))
                 else:
                     if k > 0 or dk > 0:
@@ -168,8 +170,8 @@ class MultitaskTranslationTask(FairseqTask):
                     else:
                         raise FileNotFoundError('Dataset not found: {} ({})'.format(split, data_path))
 
-                src_datasets.append(indexed_dataset(prefix + src, self.src_dict))
-                tgt_clean_datasets.append(indexed_dataset(prefix + src + '_clean', self.src_dict))
+                src_datasets.append(indexed_dataset(prefix_noisy + 'noisy-' + src, self.src_dict))
+                tgt_clean_datasets.append(indexed_dataset(prefix + src, self.src_dict))
                 tgt_translation_datasets.append(indexed_dataset(prefix + tgt, self.tgt_dict))
 
                 print('| {} {} {} examples'.format(data_path, split_k, len(src_datasets[-1])))
@@ -182,8 +184,8 @@ class MultitaskTranslationTask(FairseqTask):
 
         if len(src_datasets) == 1:
             src_dataset, tgt_clean_dataset, tgt_trans_dataset = src_datasets[0], \
-                                                                      tgt_clean_datasets[0], \
-                                                                      tgt_translation_datasets[0]
+                                                                tgt_clean_datasets[0], \
+                                                                tgt_translation_datasets[0]
         else:
             raise NotImplementedError
             sample_ratios = [1] * len(src_datasets)
