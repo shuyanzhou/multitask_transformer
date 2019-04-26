@@ -12,6 +12,7 @@ import torch
 from fairseq import search, utils
 from fairseq.models import FairseqIncrementalDecoder
 
+HIDDEN_SIZE = 512
 
 class SequenceGenerator(object):
     def __init__(
@@ -146,7 +147,6 @@ class SequenceGenerator(object):
         encoder_outs = model.forward_encoder(encoder_input)
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
         new_order = new_order.to(src_tokens.device).long()
-        # [sent_len, batch_size, hidden_size] - > [sent_len, batch_size * beam_size, hidden_size]
         encoder_outs = model.reorder_encoder_out(encoder_outs, new_order)
 
         # initialize buffers
@@ -154,6 +154,8 @@ class SequenceGenerator(object):
         scores_buf = scores.clone()
         tokens = src_tokens.data.new(bsz * beam_size, max_len + 2).long().fill_(self.pad)
         tokens_buf = tokens.clone()
+        clean_decoder_state = src_tokens.data.new(bsz * beam_size, max_len + 2, HIDDEN_SIZE).float().fill_(0)
+        clean_decoder_state_buf = clean_decoder_state.clone()
         tokens[:, 0] = bos_token or self.eos
         attn, attn_buf = None, None
         nonpad_idxs = None
@@ -222,6 +224,11 @@ class SequenceGenerator(object):
             tokens_clone = tokens.index_select(0, bbsz_idx)
             tokens_clone = tokens_clone[:, 1:step + 2]  # skip the first index, which is EOS
             tokens_clone[:, step] = self.eos
+            clean_decoder_state_clone = clean_decoder_state.index_select(0, bbsz_idx)
+            # [batch_size * beam_size, steps, embed_size]
+            clean_decoder_state_clone = clean_decoder_state_clone[:, 1:step+2]
+            clean_decoder_state_clone[:, step] = decoder_out_linear.index_select(0, bbsz_idx)
+
             attn_clone = attn.index_select(0, bbsz_idx)[:, :, 1:step+2] if attn is not None else None
 
             # compute scores per token position
@@ -268,6 +275,7 @@ class SequenceGenerator(object):
                         'attention': hypo_attn,  # src_len x tgt_len
                         'alignment': alignment,
                         'positional_scores': pos_scores[i],
+                        'clean_decoder_state': clean_decoder_state_clone[i]
                     }
 
                 if len(finalized[sent]) < beam_size:
@@ -305,11 +313,15 @@ class SequenceGenerator(object):
                 model.reorder_incremental_state(reorder_state)
                 model.reorder_encoder_out(encoder_outs, reorder_state)
 
-            lprobs, avg_attn_scores = model.forward_decoder(tokens[:, :step + 1], encoder_outs)
+            # token = [bsz * beam_size, step + 1]
+            # decoder_out_linear = [bsz * beam_size, embed_size] 1 because incremental is not None
+            # lprops = [bsz * beam_size, vocab_size]
+            lprobs, avg_attn_scores, decoder_out_linear = model.forward_decoder(tokens[:, :step + 1], encoder_outs)
 
             lprobs[:, self.pad] = -math.inf  # never select pad
             lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
 
+            #TODO, it is assumed to be 0
             if self.no_repeat_ngram_size > 0:
                 # for each beam and batch sentence, generate a list of previous ngrams
                 gen_ngrams = [{} for bbsz_idx in range(bsz * beam_size)]
@@ -334,6 +346,7 @@ class SequenceGenerator(object):
             if step < max_len:
                 self.search.set_src_lengths(src_lengths)
 
+                # TODO, the same as above
                 if self.no_repeat_ngram_size > 0:
                     def calculate_banned_tokens(bbsz_idx):
                         # before decoding the next token, prevent decoding of ngrams that have already appeared
@@ -349,6 +362,7 @@ class SequenceGenerator(object):
                     for bbsz_idx in range(bsz * beam_size):
                         lprobs[bbsz_idx, banned_tokens[bbsz_idx]] = -math.inf
 
+                # TODO, prefix_tokens is None by default
                 if prefix_tokens is not None and step < prefix_tokens.size(1):
                     probs_slice = lprobs.view(bsz, -1, lprobs.size(-1))[:, 0, :]
                     cand_scores = torch.gather(
@@ -373,6 +387,9 @@ class SequenceGenerator(object):
                         cand_indices[partial_prefix_mask] = partial_indices[partial_prefix_mask]
                         cand_beams[partial_prefix_mask] = partial_beams[partial_prefix_mask]
                 else:
+                    # cand_score = [batch_size, beam_size * 2]
+                    # cand_indices = [batch_size, beam_size * 2], which shows the word idx of each beam
+                    # cand_beams = [batch_size, beam_size * 2], which shows the beam idx of each beam
                     cand_scores, cand_indices, cand_beams = self.search.step(
                         step,
                         lprobs.view(bsz, -1, self.vocab_size),
@@ -415,6 +432,7 @@ class SequenceGenerator(object):
                         mask=eos_mask[:, :beam_size],
                         out=eos_scores,
                     )
+                    # eos_bbsz_idx is the FLATTEN beam index, eos_scores are their corresponding scores, cand_scores(a.k.a unfinalized score) are all scores
                     finalized_sents = finalize_hypos(step, eos_bbsz_idx, eos_scores, cand_scores)
                     num_remaining_sent -= len(finalized_sents)
 
@@ -445,6 +463,9 @@ class SequenceGenerator(object):
                 scores_buf.resize_as_(scores)
                 tokens = tokens.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, -1)
                 tokens_buf.resize_as_(tokens)
+                # [batch_size, beam_size, hidden_size]
+                clean_decoder_state.view(bsz, -1, HIDDEN_SIZE)[batch_idxs].view(new_bsz * beam_size, -1, HIDDEN_SIZE)
+                clean_decoder_state_buf.resize_as_(clean_decoder_state)
                 if attn is not None:
                     attn = attn.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, attn.size(1), -1)
                     attn_buf.resize_as_(attn)
@@ -492,6 +513,17 @@ class SequenceGenerator(object):
                 cand_indices, dim=1, index=active_hypos,
                 out=tokens_buf.view(bsz, beam_size, -1)[:, :, step + 1],
             )
+
+            # copy hidden state
+            torch.index_select(
+                clean_decoder_state[:, :step + 1, :], dim=0, index=active_bbsz_idx,
+                out=clean_decoder_state_buf[:, :step + 1, :]
+            )
+            torch.gather(
+                decoder_out_linear.view(bsz, beam_size, -1), dim=1, index=active_hypos,
+                out=clean_decoder_state_buf.view(bsz, beam_size, -1, HIDDEN_SIZE)[:, :, step + 1, :]
+            )
+
             if step > 0:
                 torch.index_select(
                     scores[:, :step], dim=0, index=active_bbsz_idx,
@@ -512,6 +544,7 @@ class SequenceGenerator(object):
             # swap buffers
             tokens, tokens_buf = tokens_buf, tokens
             scores, scores_buf = scores_buf, scores
+            clean_decoder_state, clean_decoder_state_buf = clean_decoder_state_buf, clean_decoder_state
             if attn is not None:
                 attn, attn_buf = attn_buf, attn
 
@@ -561,7 +594,8 @@ class EnsembleModel(torch.nn.Module):
         log_probs = []
         avg_attn = None
         for model, encoder_out in zip(self.models, encoder_outs):
-            probs, attn = self._decode_one(tokens, model, encoder_out, self.incremental_states, log_probs=True)
+            # token = [bsz * beam_size, step + 1]
+            probs, attn, _ = self._decode_one(tokens, model, encoder_out, self.incremental_states, log_probs=True)
             log_probs.append(probs)
             if attn is not None:
                 if avg_attn is None:
@@ -574,11 +608,16 @@ class EnsembleModel(torch.nn.Module):
         return avg_probs, avg_attn
 
     def _decode_one(self, tokens, model, encoder_out, incremental_states, log_probs):
+        # token = [bsz * beam_size, max_len + 2]
         if self.incremental_states is not None:
             decoder_out = list(model.decoder(tokens, encoder_out, incremental_state=self.incremental_states[model]))
         else:
             decoder_out = list(model.decoder(tokens, encoder_out))
         decoder_out[0] = decoder_out[0][:, -1:, :]
+        # [bsz * beam_size, 1, embed_size] 1 because incremental is not None
+        # meanwhile, it will update incremental state
+        decoder_out_linear = decoder_out[1]["before_linear"]
+        decoder_out_linear = decoder_out_linear.squeeze(1)
         attn = decoder_out[1]
         if type(attn) is dict:
             attn = attn['attn']
@@ -588,7 +627,7 @@ class EnsembleModel(torch.nn.Module):
             attn = attn[:, -1, :]
         probs = model.get_normalized_probs(decoder_out, log_probs=log_probs)
         probs = probs[:, -1, :]
-        return probs, attn
+        return probs, attn, decoder_out_linear
 
     def reorder_encoder_out(self, encoder_outs, new_order):
         if not self.has_encoder():
