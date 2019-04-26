@@ -44,6 +44,8 @@ def collate(
         target_clean = target_clean.index_select(0, sort_order)
         ntokens = sum(len(s['target_clean']) for s in samples)
         tgt_clean_mask = target_clean.eq(pad_idx)
+        if not tgt_clean_mask.any():
+            tgt_clean_mask = None
 
         if input_feeding:
             # we create a shifted version of targets for feeding the
