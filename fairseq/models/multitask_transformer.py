@@ -9,7 +9,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import copy
 from fairseq import options, utils
 from fairseq.modules import (
     AdaptiveInput, AdaptiveSoftmax, CharacterTokenEmbedder, LayerNorm,
@@ -260,14 +260,23 @@ class TransformerEncoder(FairseqEncoder):
         Returns:
             *encoder_out* rearranged according to *new_order*
         """
-        if encoder_out['encoder_out'] is not None:
+        if 'encoder_out' in encoder_out and encoder_out['encoder_out'] is not None:
             encoder_out['encoder_out'] = \
                 encoder_out['encoder_out'].index_select(1, new_order)
-        if encoder_out['encoder_padding_mask'] is not None:
+        if 'encoder_padding_mask' in encoder_out and encoder_out['encoder_padding_mask'] is not None:
             encoder_out['encoder_padding_mask'] = \
                 encoder_out['encoder_padding_mask'].index_select(0, new_order)
-        if encoder_out['clean_scores'] is not None:
-            encoder_out['clean_scores'] = encoder_out['clean_scores'].index_select(0, new_order)
+        # if 'clean_scores' in encoder_out and encoder_out['clean_scores'] is not None:
+        #     encoder_out['clean_scores'] = encoder_out['clean_scores'].index_select(0, new_order)
+
+        # add decoder here
+        if 'decoder_out' in encoder_out and encoder_out['decoder_out'] is not None:
+            encoder_out['decoder_out'] = \
+                encoder_out['decoder_out'].index_select(1, new_order)
+        if 'decoder_padding_mask' in encoder_out and encoder_out['decoder_padding_mask'] is not None:
+            encoder_out['decoder_padding_mask'] = \
+                encoder_out['decoder_padding_mask'].index_select(0, new_order)
+
         return encoder_out
 
     def max_positions(self):
@@ -612,7 +621,8 @@ class TransformerTranslationDecoder(FairseqIncrementalDecoder):
 
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
-
+        # B x T x C -> T x B x C
+        before_linear = x.transpose(0, 1)
         if self.adaptive_softmax is None:
             # project back to size of vocabulary
             if self.share_input_output_embed:
@@ -620,7 +630,8 @@ class TransformerTranslationDecoder(FairseqIncrementalDecoder):
             else:
                 x = F.linear(x, self.embed_out)
 
-        return x, {'attn': {'encoder': encoder_attn, 'decoder': decoder_attn}, 'inner_states': inner_states}
+        return x, {'attn': None, 'inner_states': inner_states,
+                   'before_linear': before_linear}
 
     def max_positions(self):
         """Maximum output length supported by the decoder."""
@@ -920,6 +931,10 @@ class TransformerTranslationDecoderLayer(nn.Module):
                 self.embed_dim, args.decoder_attention_heads,
                 dropout=args.attention_dropout,
             )
+            self.decoder_attn = MultiheadAttention(
+                self.embed_dim, args.decoder_attention_heads,
+                dropout=args.attention_dropout,
+            )
             self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
             self.two_attn_linear = Linear(self.embed_dim * 2, self.embed_dim)
 
@@ -977,7 +992,11 @@ class TransformerTranslationDecoderLayer(nn.Module):
                     incremental_state = {}
                 prev_key, prev_value = prev_attn_state
                 saved_state = {"prev_key": prev_key, "prev_value": prev_value}
+                # encoder_incremental_state = copy.deepcopy(incremental_state)
+                # decoder_incremental_state = copy.deepcopy(incremental_state)
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
+                self.decoder_attn._set_input_buffer(incremental_state, saved_state)
+            #_incremental_state = copy.deepcopy(incremental_state)
             x_encoder, attn_encoder = self.encoder_attn(
                 query=x,
                 key=encoder_out,
@@ -987,7 +1006,7 @@ class TransformerTranslationDecoderLayer(nn.Module):
                 static_kv=True,
                 need_weights=(not self.training and self.need_attn),
             )
-            x_decoder, attn_decoder = self.encoder_attn(
+            x_decoder, attn_decoder = self.decoder_attn(
                 query=x,
                 key=decoder_out,
                 value=decoder_out,
@@ -1011,6 +1030,7 @@ class TransformerTranslationDecoderLayer(nn.Module):
         x = residual + x
         x = self.maybe_layer_norm(self.final_layer_norm, x, after=True)
         if self.onnx_trace:
+            raise NotImplementedError
             saved_state = self.self_attn._get_input_buffer(incremental_state)
             self_attn_state = saved_state["prev_key"], saved_state["prev_value"]
             return x, attn_encoder, attn_decoder, self_attn_state

@@ -124,9 +124,7 @@ class MultitaskSequenceGenerator(object):
             prefix_tokens=None,
             bos_token=None,
             is_translation=False,
-            beam_idx=-1,
-            noisy_clean_encoder_outs=None,
-            **kwargs
+            noisy_clean_outs=None,
     ):
         """Generate a batch of translations.
 
@@ -165,11 +163,23 @@ class MultitaskSequenceGenerator(object):
                     model.max_decoder_positions() - 1,
                 )
             # compute the encoder output for each beam
+            # T X B X C, mask: B X T
             encoder_outs = model.forward_encoder(encoder_input)
             noisy_encoder_out = copy.deepcopy(encoder_outs[0])
         else:
-            encoder_outs = noisy_clean_encoder_outs
+            encoder_outs = noisy_clean_outs
+            beam_size = self.beam_size
+            max_len = min(
+                int(self.max_len_a * 0 + self.max_len_b),
+                # exclude the EOS marker
+                model.max_decoder_positions() - 1,
+            )
+            bsz = encoder_outs[0]['encoder_out'].shape[0]
+            # fake src token
+            src_tokens = torch.zeros((0, 0), device=encoder_outs[0]['encoder_out'].device)
+            src_tokens = src_tokens.long()
             noisy_encoder_out = None
+
 
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
         new_order = new_order.to(src_tokens.device).long()
@@ -283,6 +293,7 @@ class MultitaskSequenceGenerator(object):
                 sents_seen.add((sent, unfin_idx))
 
                 if self.match_source_len and step > src_lengths[unfin_idx]:
+                    raise NotImplementedError
                     score = -math.inf
 
                 def get_hypo():
@@ -295,17 +306,14 @@ class MultitaskSequenceGenerator(object):
                         hypo_attn = None
                         alignment = None
 
-                    decoder_mask = tokens_clone[i].eq(self.pad)
-                    if not decoder_mask.any():
-                        decoder_mask = None
                     return {
                         'tokens': tokens_clone[i],
                         'score': score,
                         'attention': hypo_attn,  # src_len x tgt_len
                         'alignment': alignment,
                         'positional_scores': pos_scores[i],
-                        'clean_encoder_out': clean_decoder_state_clone[i],
-                        'mask': decoder_mask
+                        'clean_decoder_out': clean_decoder_state_clone[i],
+                        'mask': tokens_clone[i].eq(self.pad)
                     }
 
                 if len(finalized[sent]) < beam_size:
@@ -364,6 +372,7 @@ class MultitaskSequenceGenerator(object):
 
             # Record attention scores
             if avg_attn_scores is not None:
+                raise NotImplementedError
                 if attn is None:
                     attn = scores.new(bsz * beam_size, src_tokens.size(1), max_len + 2)
                     attn_buf = attn.clone()
@@ -375,11 +384,11 @@ class MultitaskSequenceGenerator(object):
             eos_bbsz_idx = buffer('eos_bbsz_idx')
             eos_scores = buffer('eos_scores', type_of=scores)
             if step < max_len:
-                if is_translation:
-                    self.tgt_search.set_src_lengths(src_lengths)
-                else:
-                    self.src_search.set_src_lengths(src_lengths)
-                # self.search.set_src_lengths(src_lengths)
+                #TODO not use
+                # if is_translation:
+                #     self.tgt_search.set_src_lengths(src_lengths)
+                # else:
+                #     self.src_search.set_src_lengths(src_lengths)
 
                 # TODO, the same as above
                 if self.no_repeat_ngram_size > 0:
@@ -518,7 +527,8 @@ class MultitaskSequenceGenerator(object):
                 decoder_out_linear = decoder_out_linear[batch_idxs]
                 if prefix_tokens is not None:
                     prefix_tokens = prefix_tokens[batch_idxs]
-                src_lengths = src_lengths[batch_idxs]
+                # TODO not use
+                #src_lengths = src_lengths[batch_idxs]
 
                 scores = scores.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, -1)
                 scores_buf.resize_as_(scores)
@@ -650,11 +660,22 @@ class EnsembleModel(torch.nn.Module):
 
     @torch.no_grad()
     def forward_decoder(self, tokens, encoder_outs, is_translation):
-        if len(self.models) == 1:
+        if not is_translation:
+            if len(self.models) == 1:
+                return self._decode_one(
+                    tokens,
+                    self.models[0],
+                    encoder_outs[0] if self.has_encoder() else None,
+                    self.incremental_states,
+                    log_probs=True,
+                    is_translation=is_translation
+                )
+        else:
             return self._decode_one(
                 tokens,
                 self.models[0],
-                encoder_outs[0] if self.has_encoder() else None,
+                # contains two encoder outs
+                encoder_outs,
                 self.incremental_states,
                 log_probs=True,
                 is_translation=is_translation
@@ -686,14 +707,14 @@ class EnsembleModel(torch.nn.Module):
             else:
                 decoder_out = list(model.decoder_clean(tokens, encoder_out))
         else:
-            noisy_encoder_out, clean_encoder_out = encoder_out[0], encoder_out[1]
+            noisy_encoder_out, clean_decoder_out = encoder_out[0], encoder_out[1]
             if self.incremental_states is not None:
                 decoder_out = list(
-                    model.decoder_translation(tokens, noisy_encoder_out, clean_encoder_out,
+                    model.decoder_translation(tokens, noisy_encoder_out, clean_decoder_out,
                                               incremental_state=self.incremental_states[model])
                 )
             else:
-                decoder_out = list(model.decoder_translation(tokens, noisy_encoder_out, clean_encoder_out))
+                decoder_out = list(model.decoder_translation(tokens, noisy_encoder_out, clean_decoder_out))
 
         decoder_out[0] = decoder_out[0][:, -1:, :]
         # [bsz * beam_size, 1, embed_size] 1 because incremental is not None
@@ -715,8 +736,10 @@ class EnsembleModel(torch.nn.Module):
         if not self.has_encoder():
             return
         return [
-            model.encoder.reorder_encoder_out(encoder_out, new_order)
-            for model, encoder_out in zip(self.models, encoder_outs)
+            # model.encoder.reorder_encoder_out(encoder_out, new_order)
+            # for model, encoder_out in zip(self.models, encoder_outs)
+            self.models[0].encoder.reorder_encoder_out(encoder_out, new_order)
+            for encoder_out in encoder_outs
         ]
 
     def reorder_incremental_state(self, new_order):
@@ -724,3 +747,4 @@ class EnsembleModel(torch.nn.Module):
             return
         for model in self.models:
             model.decoder_clean.reorder_incremental_state(self.incremental_states[model], new_order)
+            model.decoder_translation.reorder_incremental_state(self.incremental_states[model], new_order)

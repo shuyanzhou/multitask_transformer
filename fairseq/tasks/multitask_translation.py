@@ -7,6 +7,7 @@
 
 import itertools
 import os
+import torch
 
 from fairseq import options, utils
 from fairseq.data import (
@@ -94,6 +95,14 @@ class MultitaskTranslationTask(FairseqTask):
         self.tgt_dict = tgt_dict
         self.translation_datasets = {}
 
+    def inference_step(self, generator, models, sample, prefix_tokens=None, bos_token=None,
+                                is_translation=False,
+                                noisy_clean_outs=None):
+        with torch.no_grad():
+            return generator.generate(models, sample, prefix_tokens=prefix_tokens, bos_token=bos_token,
+                                      is_translation=is_translation,
+                                      noisy_clean_outs=noisy_clean_outs
+                                      )
     @classmethod
     def setup_task(cls, args, **kwargs):
         """Setup the task (e.g., load dictionaries).
@@ -211,6 +220,7 @@ class MultitaskTranslationTask(FairseqTask):
             from fairseq.multitask_sequence_generator import MultitaskSequenceGenerator
             return MultitaskSequenceGenerator(
                 self.source_dictionary,
+                self.target_dictionary,
                 beam_size=args.beam,
                 max_len_a=args.max_len_a,
                 max_len_b=args.max_len_b,
