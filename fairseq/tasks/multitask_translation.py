@@ -210,7 +210,7 @@ class MultitaskTranslationTask(FairseqTask):
         else:
             from fairseq.multitask_sequence_generator import MultitaskSequenceGenerator
             return MultitaskSequenceGenerator(
-                self.target_dictionary,
+                self.source_dictionary,
                 beam_size=args.beam,
                 max_len_a=args.max_len_a,
                 max_len_b=args.max_len_b,

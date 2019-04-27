@@ -228,7 +228,7 @@ class MultitaskSequenceGenerator(object):
             clean_decoder_state_clone = clean_decoder_state.index_select(0, bbsz_idx)
             # [batch_size * beam_size, steps, embed_size]
             clean_decoder_state_clone = clean_decoder_state_clone[:, 1:step + 2]
-            clean_decoder_state_clone[:, step] = decoder_out_linear.index_select(0, bbsz_idx)
+            clean_decoder_state_clone[:, step] = decoder_out_linear.view(-1, HIDDEN_SIZE).index_select(0, bbsz_idx)
 
             attn_clone = attn.index_select(0, bbsz_idx)[:, :, 1:step + 2] if attn is not None else None
 
@@ -318,7 +318,7 @@ class MultitaskSequenceGenerator(object):
             # decoder_out_linear = [bsz * beam_size, embed_size] 1 because incremental is not None
             # lprops = [bsz * beam_size, vocab_size]
             lprobs, avg_attn_scores, decoder_out_linear = model.forward_decoder(tokens[:, :step + 1], encoder_outs)
-
+            decoder_out_linear = decoder_out_linear.view(-1, beam_size, HIDDEN_SIZE)
             lprobs[:, self.pad] = -math.inf  # never select pad
             lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
 
@@ -456,6 +456,7 @@ class MultitaskSequenceGenerator(object):
                 cand_bbsz_idx = cand_beams.add(bbsz_offsets)
                 cand_scores = cand_scores[batch_idxs]
                 cand_indices = cand_indices[batch_idxs]
+                decoder_out_linear = decoder_out_linear[batch_idxs]
                 if prefix_tokens is not None:
                     prefix_tokens = prefix_tokens[batch_idxs]
                 src_lengths = src_lengths[batch_idxs]
@@ -465,7 +466,7 @@ class MultitaskSequenceGenerator(object):
                 tokens = tokens.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, -1)
                 tokens_buf.resize_as_(tokens)
                 # [batch_size, beam_size, hidden_size]
-                clean_decoder_state.view(bsz, -1, HIDDEN_SIZE)[batch_idxs].view(new_bsz * beam_size, -1, HIDDEN_SIZE)
+                clean_decoder_state = clean_decoder_state.view(bsz, -1, HIDDEN_SIZE)[batch_idxs].view(new_bsz * beam_size, -1, HIDDEN_SIZE)
                 clean_decoder_state_buf.resize_as_(clean_decoder_state)
                 if attn is not None:
                     attn = attn.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, attn.size(1), -1)
@@ -520,10 +521,17 @@ class MultitaskSequenceGenerator(object):
                 clean_decoder_state[:, :step + 1, :], dim=0, index=active_bbsz_idx,
                 out=clean_decoder_state_buf[:, :step + 1, :]
             )
-            torch.gather(
-                decoder_out_linear.view(bsz, beam_size, -1), dim=1, index=active_hypos,
-                out=clean_decoder_state_buf.view(bsz, beam_size, -1, HIDDEN_SIZE)[:, :, step + 1, :]
-            )
+
+            # active_hypos_expand = torch.unsqueeze(active_hypos,2).repeat(1,1,512)
+            clean_decoder_state_buf=clean_decoder_state_buf.reshape(bsz, beam_size, -1, HIDDEN_SIZE)
+            clean_decoder_state_buf[:, :, step + 1, :]=decoder_out_linear
+            clean_decoder_state_buf=clean_decoder_state_buf.reshape(bsz*beam_size,-1,HIDDEN_SIZE)
+            # torch.gather(
+            #     decoder_out_linear.view(bsz, beam_size, -1), dim=1, index=active_hypos_expand,
+            #     out=clean_decoder_state_buf.view(bsz, beam_size, -1, HIDDEN_SIZE)[:, :, step + 1, :]
+            # )
+
+
 
             if step > 0:
                 torch.index_select(
