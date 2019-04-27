@@ -424,7 +424,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
-        before_linear = x
+        # B x T x C -> T x B x C
+        before_linear = x.transpose(0, 1)
         if self.adaptive_softmax is None:
             # project back to size of vocabulary
             if self.share_input_output_embed:
