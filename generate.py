@@ -151,6 +151,7 @@ def main(args):
                 update_scores(translate_hypos, noisy_clean_outs["clean_decoder_out"][beam_idx]["clean_scores"])
                 all_hypos.append(translate_hypos)
 
+
             num_generated_tokens = sum(len(h[0]['tokens']) for h in hypos)
             gen_timer.stop(num_generated_tokens)
 

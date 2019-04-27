@@ -174,7 +174,7 @@ class MultitaskSequenceGenerator(object):
                 # exclude the EOS marker
                 model.max_decoder_positions() - 1,
             )
-            bsz = encoder_outs[0]['encoder_out'].shape[0]
+            bsz = encoder_outs[0]['encoder_out'].shape[1]
             # fake src token
             src_tokens = torch.zeros((0, 0), device=encoder_outs[0]['encoder_out'].device)
             src_tokens = src_tokens.long()
