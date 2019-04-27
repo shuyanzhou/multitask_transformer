@@ -20,19 +20,19 @@ def retrieve_noisy_clean_encoder_outs(hypos, noisy_encoder_out, beam_size, max_l
     noisy_clean_encoder_outs = {}
     noisy_clean_encoder_outs['noisy_encoder_out'] = noisy_encoder_out
     noisy_clean_encoder_outs['clean_encoder_out'] = []
-
+    all_encoder_outs = []
     _, batch_size, embed_size = noisy_encoder_out['encoder_out'].shape
     for i in range(beam_size):
         clean_encoder_tensor = torch.zeros((batch_size, max_len, embed_size))
         clean_encoder_padding_mask = torch.zeros((batch_size, max_len))
-        clean_scores = []
+        clean_scores = torch.zeros((batch_size))
         for idx, sample in enumerate(hypos):
             cur_hypo = sample[i]
             clean_decoder_state = cur_hypo["clean_encoder_out"]
             mask = cur_hypo["mask"]
             clean_encoder_tensor[idx, :, :, ] = clean_decoder_state
             clean_encoder_padding_mask[idx, :] = mask
-            clean_scores.append(sample["score"])
+            clean_scores[idx] = sample["score"]
         clean_encoder_tensor = torch.transpose(clean_encoder_tensor, 1, 0)
         clean_encoder_padding_mask = torch.transpose(clean_encoder_padding_mask, 1, 0)
         noisy_clean_encoder_outs['clean_encoder_out'].append({
@@ -40,8 +40,8 @@ def retrieve_noisy_clean_encoder_outs(hypos, noisy_encoder_out, beam_size, max_l
             'encoder_padding_mask': clean_encoder_padding_mask,
             'clean_scores': clean_scores
         })
-
-    return noisy_clean_encoder_outs
+        all_encoder_outs.append([noisy_encoder_out, noisy_clean_encoder_outs['clean_encoder_out'][-1]])
+    return noisy_clean_encoder_outs, all_encoder_outs
 
 
 def update_scores(translate_hypo, clean_scores, p=0.5):
@@ -139,13 +139,14 @@ def main(args):
             gen_timer.start()
             # noisy_encoder_out is a dictionary
             hypos, noisy_encoder_out, max_len = task.inference_step(generator, models, sample, prefix_tokens)
-            noisy_clean_encoder_outs = retrieve_noisy_clean_encoder_outs(hypos, noisy_encoder_out, args.beam, max_len)
+            noisy_clean_encoder_outs, all_encoder_outs = \
+                retrieve_noisy_clean_encoder_outs(hypos, noisy_encoder_out, args.beam, max_len)
             all_hypos = []
             for beam_idx in range(args.beam):
                 translate_hypos, _, _ = task.inference_step(generator, models, sample=None, prefix_tokens=prefix_tokens,
                                                       bos_token=None, is_trasnlation=True,
                                                       beam_idx=beam_idx,
-                                                      noisy_clean_encoder_outs=noisy_clean_encoder_outs)
+                                                      noisy_clean_encoder_outs=all_encoder_outs[beam_idx])
                 update_scores(translate_hypos, noisy_clean_encoder_outs["clean_encoder_out"][beam_idx]["clean_scores"])
                 all_hypos.append(translate_hypos)
 

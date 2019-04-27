@@ -641,7 +641,7 @@ class EnsembleModel(torch.nn.Module):
             else:
                 decoder_out = list(model.decoder_clean(tokens, encoder_out))
         else:
-            noisy_encoder_out, clean_encoder_out = encoder_out["noisy_encoder_out"], encoder_out["clean_encoder_out"]
+            noisy_encoder_out, clean_encoder_out = encoder_out[0], encoder_out[1]
             if self.incremental_states is not None:
                 decoder_out = list(
                     model.decoder_translation(tokens, noisy_encoder_out, clean_encoder_out,

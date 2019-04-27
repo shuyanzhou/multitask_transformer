@@ -6,7 +6,6 @@
 # can be found in the PATENTS file in the same directory.
 
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -267,6 +266,8 @@ class TransformerEncoder(FairseqEncoder):
         if encoder_out['encoder_padding_mask'] is not None:
             encoder_out['encoder_padding_mask'] = \
                 encoder_out['encoder_padding_mask'].index_select(0, new_order)
+        if encoder_out['clean_scores'] is not None:
+            encoder_out['clean_scores'] = encoder_out['clean_scores'].index_select(0, new_order)
         return encoder_out
 
     def max_positions(self):
