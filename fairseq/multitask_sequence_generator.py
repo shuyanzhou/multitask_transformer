@@ -19,6 +19,7 @@ HIDDEN_SIZE = 512
 class MultitaskSequenceGenerator(object):
     def __init__(
             self,
+            src_dict,
             tgt_dict,
             beam_size=1,
             max_len_a=0,
@@ -40,6 +41,7 @@ class MultitaskSequenceGenerator(object):
         """Generates translations of a given source sentence.
 
         Args:
+            src_dict (~fairseq.data.Dictionary): source dictionary
             tgt_dict (~fairseq.data.Dictionary): target dictionary
             beam_size (int, optional): beam width (default: 1)
             max_len_a/b (int, optional): generate sequences of maximum length
@@ -72,10 +74,15 @@ class MultitaskSequenceGenerator(object):
         self.pad = tgt_dict.pad()
         self.unk = tgt_dict.unk()
         self.eos = tgt_dict.eos()
-        self.vocab_size = len(tgt_dict)
+
+        self.src_vocab_size = len(src_dict)
+        self.tgt_vocab_size = len(tgt_dict)
+
         self.beam_size = beam_size
         # the max beam size is the dictionary size - 1, since we never select pad
-        self.beam_size = min(beam_size, self.vocab_size - 1)
+        self.src_beam_size = min(beam_size, self.src_vocab_size - 1)
+        self.tgt_beam_size = min(beam_size, self.tgt_vocab_size - 1)
+
         self.max_len_a = max_len_a
         self.max_len_b = max_len_b
         self.min_len = min_len
@@ -90,15 +97,24 @@ class MultitaskSequenceGenerator(object):
         assert sampling_topk < 0 or sampling, '--sampling-topk requires --sampling'
 
         if sampling:
-            self.search = search.Sampling(tgt_dict, sampling_topk, sampling_temperature)
+            self.tgt_search = search.Sampling(tgt_dict, sampling_topk, sampling_temperature)
+            self.src_search = search.Sampling(src_dict, sampling_topk, sampling_temperature)
+
         elif diverse_beam_groups > 0:
-            self.search = search.DiverseBeamSearch(tgt_dict, diverse_beam_groups, diverse_beam_strength)
+            self.tgt_search = search.DiverseBeamSearch(tgt_dict, diverse_beam_groups, diverse_beam_strength)
+            self.src_search = search.DiverseBeamSearch(src_dict, diverse_beam_groups, diverse_beam_strength)
+
         elif match_source_len:
-            self.search = search.LengthConstrainedBeamSearch(
+            self.tgt_search = search.LengthConstrainedBeamSearch(
                 tgt_dict, min_len_a=1, min_len_b=0, max_len_a=1, max_len_b=0,
             )
+            self.src_search = search.LengthConstrainedBeamSearch(
+                src_dict, min_len_a=1, min_len_b=0, max_len_a=1, max_len_b=0,
+            )
         else:
-            self.search = search.BeamSearch(tgt_dict)
+            self.tgt_search = search.BeamSearch(tgt_dict)
+            self.src_search = search.BeamSearch(src_dict)
+
 
     @torch.no_grad()
     def generate(
@@ -359,7 +375,11 @@ class MultitaskSequenceGenerator(object):
             eos_bbsz_idx = buffer('eos_bbsz_idx')
             eos_scores = buffer('eos_scores', type_of=scores)
             if step < max_len:
-                self.search.set_src_lengths(src_lengths)
+                if is_translation:
+                    self.tgt_search.set_src_lengths(src_lengths)
+                else:
+                    self.src_search.set_src_lengths(src_lengths)
+                # self.search.set_src_lengths(src_lengths)
 
                 # TODO, the same as above
                 if self.no_repeat_ngram_size > 0:
@@ -393,11 +413,23 @@ class MultitaskSequenceGenerator(object):
                     # handle prefixes of different lengths
                     partial_prefix_mask = prefix_tokens[:, step].eq(self.pad)
                     if partial_prefix_mask.any():
-                        partial_scores, partial_indices, partial_beams = self.search.step(
-                            step,
-                            lprobs.view(bsz, -1, self.vocab_size),
-                            scores.view(bsz, beam_size, -1)[:, :, :step],
-                        )
+                        if is_translation:
+                            partial_scores, partial_indices, partial_beams = self.tgt_search.step(
+                                step,
+                                lprobs.view(bsz, -1, self.tgt_vocab_size),
+                                scores.view(bsz, beam_size, -1)[:, :, :step],
+                            )
+                        else:
+                            partial_scores, partial_indices, partial_beams = self.src_search.step(
+                                step,
+                                lprobs.view(bsz, -1, self.src_vocab_size),
+                                scores.view(bsz, beam_size, -1)[:, :, :step],
+                            )
+                        # partial_scores, partial_indices, partial_beams = self.search.step(
+                        #     step,
+                        #     lprobs.view(bsz, -1, self.vocab_size),
+                        #     scores.view(bsz, beam_size, -1)[:, :, :step],
+                        # )
                         cand_scores[partial_prefix_mask] = partial_scores[partial_prefix_mask]
                         cand_indices[partial_prefix_mask] = partial_indices[partial_prefix_mask]
                         cand_beams[partial_prefix_mask] = partial_beams[partial_prefix_mask]
@@ -405,11 +437,24 @@ class MultitaskSequenceGenerator(object):
                     # cand_score = [batch_size, beam_size * 2]
                     # cand_indices = [batch_size, beam_size * 2], which shows the word idx of each beam
                     # cand_beams = [batch_size, beam_size * 2], which shows the beam idx of each beam
-                    cand_scores, cand_indices, cand_beams = self.search.step(
-                        step,
-                        lprobs.view(bsz, -1, self.vocab_size),
-                        scores.view(bsz, beam_size, -1)[:, :, :step],
-                    )
+                    if is_translation:
+                        cand_scores, cand_indices, cand_beams = self.tgt_search.step(
+                            step,
+                            lprobs.view(bsz, -1, self.tgt_vocab_size),
+                            scores.view(bsz, beam_size, -1)[:, :, :step],
+                        )
+                    else:
+                        cand_scores, cand_indices, cand_beams = self.src_search.step(
+                            step,
+                            lprobs.view(bsz, -1, self.src_vocab_size),
+                            scores.view(bsz, beam_size, -1)[:, :, :step],
+                        )
+
+                    # cand_scores, cand_indices, cand_beams = self.search.step(
+                    #     step,
+                    #     lprobs.view(bsz, -1, self.vocab_size),
+                    #     scores.view(bsz, beam_size, -1)[:, :, :step],
+                    # )
             else:
                 # make probs contain cumulative scores for each hypothesis
                 lprobs.add_(scores[:, step - 1].unsqueeze(-1))
