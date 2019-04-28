@@ -167,7 +167,7 @@ def load_ensemble_for_inference(filenames, task, model_arg_overrides=None):
         # build model for ensemble
         model = task.build_model(args)
         model.upgrade_state_dict(state['model'])
-        model.load_state_dict(state['model'], strict=False)
+        model.load_state_dict(state['model'], strict=True)
         ensemble.append(model)
 
         # some args (e.g., tokens_per_sample) might have been updated while building the model
