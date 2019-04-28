@@ -352,10 +352,9 @@ class MultitaskSequenceGenerator(object):
                 model.reorder_encoder_out(encoder_outs, reorder_state)
 
             # token = [bsz * beam_size, step + 1]
-            # decoder_out_linear = [bsz * beam_size, embed_size] 1 because incremental is not None
+            # decoder_out_linear = [bsz * beam_size, embed_size]
             # lprops = [bsz * beam_size, vocab_size]
-            lprobs, avg_attn_scores, decoder_out_linear = model.forward_decoder(tokens[:, :step + 1], encoder_outs,
-                                                                                is_translation)
+            lprobs, avg_attn_scores, decoder_out_linear = model.forward_decoder(tokens[:, :step + 1], encoder_outs, is_translation)
             decoder_out_linear = decoder_out_linear.view(-1, beam_size, HIDDEN_SIZE)
             lprobs[:, self.pad] = -math.inf  # never select pad
             lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
@@ -444,8 +443,8 @@ class MultitaskSequenceGenerator(object):
                         cand_beams[partial_prefix_mask] = partial_beams[partial_prefix_mask]
                 else:
                     # cand_score = [batch_size, beam_size * 2]
-                    # cand_indices = [batch_size, beam_size * 2], which shows the word idx of each beam
-                    # cand_beams = [batch_size, beam_size * 2], which shows the beam idx of each beam
+                    # cand_indices = [batch_size, beam_size * 2], which shows the top (beam_size * 2) words of the current step
+                    # cand_beams = [batch_size, beam_size * 2], which shows the beam idx (0 ~ beam_size * 2)
                     if is_translation:
                         cand_scores, cand_indices, cand_beams = self.tgt_search.step(
                             step,
@@ -715,12 +714,12 @@ class EnsembleModel(torch.nn.Module):
                 )
             else:
                 decoder_out = list(model.decoder_translation(tokens, noisy_encoder_out, clean_decoder_out))
-
+        # during generating, it always use the LAST state, which makes the length be 1 all the time!
         decoder_out[0] = decoder_out[0][:, -1:, :]
-        # [bsz * beam_size, 1, embed_size] 1 because incremental is not None
+        # [1, bsz * beam_size, embed_size]
         # meanwhile, it will update incremental state
         decoder_out_linear = decoder_out[1]["before_linear"]
-        decoder_out_linear = decoder_out_linear.squeeze(1)
+        # decoder_out_linear = decoder_out_linear.squeeze(1)
         attn = decoder_out[1]
         if type(attn) is dict:
             attn = attn['attn']
@@ -747,4 +746,6 @@ class EnsembleModel(torch.nn.Module):
             return
         for model in self.models:
             model.decoder_clean.reorder_incremental_state(self.incremental_states[model], new_order)
+            # it is ok to leave it here even in decode clean data step
+            # because each module will only reorder its children's order, but now decoder_translation does not ha
             model.decoder_translation.reorder_incremental_state(self.incremental_states[model], new_order)
