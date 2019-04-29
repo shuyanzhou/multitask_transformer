@@ -10,10 +10,49 @@ Translate pre-processed data with a trained model.
 """
 
 import torch
-
+import copy
 from fairseq import bleu, options, progress_bar, tasks, utils
 from fairseq.meters import StopwatchMeter, TimeMeter
 from fairseq.utils import import_user_module
+
+
+def retrieve_noisy_clean_outs(hypos, noisy_encoder_out, beam_size, max_len):
+    all_outs = []
+    all_clean_scores = []
+    _, batch_size, embed_size = noisy_encoder_out['encoder_out'].shape
+    device = noisy_encoder_out['encoder_out'].device
+    max_len = max_len + 2
+    for beam_idx in range(beam_size):
+        clean_decoder_tensor = torch.zeros((batch_size, max_len, embed_size))
+        clean_decoder_padding_mask = torch.ones((batch_size, max_len)).byte()
+        clean_scores = torch.zeros((batch_size))
+        for sample_idx, sample in enumerate(hypos):
+            cur_hypo = sample[beam_idx]
+            clean_decoder_out = cur_hypo["clean_decoder_out"]
+            mask = cur_hypo["mask"]
+            cur_len = clean_decoder_out.shape[0]
+            clean_decoder_tensor[sample_idx, :cur_len, :, ] = clean_decoder_out
+            clean_decoder_padding_mask[sample_idx, :cur_len] = mask
+            clean_scores[sample_idx] = cur_hypo["score"]
+        clean_decoder_tensor = torch.transpose(clean_decoder_tensor, 1, 0)
+        if not clean_decoder_padding_mask.any():
+            clean_decoder_padding_mask = None
+        clean_scores = clean_scores.to(device)
+        clean_decoder_tensor = clean_decoder_tensor.to(device)
+        clean_decoder_padding_mask = clean_decoder_padding_mask.to(device)
+        all_clean_scores.append(clean_scores)
+        cur_clean_decoder_out = {
+            'decoder_out': clean_decoder_tensor,
+            'decoder_padding_mask': clean_decoder_padding_mask,
+        }
+        all_outs.append([copy.deepcopy(noisy_encoder_out), copy.deepcopy(cur_clean_decoder_out)])
+    return all_clean_scores, all_outs
+
+
+def update_scores(translate_hypo, clean_scores:torch.Tensor, p=0.5):
+    for idx, sentence_hypo in enumerate(translate_hypo):
+        for beam_hypo in sentence_hypo:
+            beam_hypo["score"] = p * beam_hypo["score"] + (1 - p) * clean_scores[idx]
 
 
 def main(args):
@@ -103,18 +142,31 @@ def main(args):
                 prefix_tokens = sample['target'][:, :args.prefix_size]
 
             gen_timer.start()
-            hypos = task.inference_step(generator, models, sample, prefix_tokens)
+            # noisy_encoder_out is a dictionary
+            hypos, noisy_encoder_out, max_len = task.inference_step(generator, models, sample, prefix_tokens)
+            # all_clean_scores: a list of length beam_size, each with batch_size length
+            all_clean_scores, all_outs = \
+                retrieve_noisy_clean_outs(hypos, noisy_encoder_out, args.beam, max_len)
+            all_hypos = []
+            for beam_idx in range(args.beam):
+                translate_hypos, _, _ = task.inference_step(generator, models, sample=None, prefix_tokens=prefix_tokens,
+                                                      bos_token=None, is_translation=True,
+                                                      noisy_clean_outs=all_outs[beam_idx])
+                # combine noisy - clean and noisy.clean - translate together
+                update_scores(translate_hypos, all_clean_scores[beam_idx])
+                all_hypos += translate_hypos
+            hypos = all_hypos
+
             num_generated_tokens = sum(len(h[0]['tokens']) for h in hypos)
             gen_timer.stop(num_generated_tokens)
 
             for i, sample_id in enumerate(sample['id'].tolist()):
-                has_target = sample['target'] is not None
-
+                has_target = sample['target_trans'] is not None
                 # Remove padding
                 src_tokens = utils.strip_pad(sample['net_input']['src_tokens'][i, :], tgt_dict.pad())
                 target_tokens = None
                 if has_target:
-                    target_tokens = utils.strip_pad(sample['target'][i, :], tgt_dict.pad()).int().cpu()
+                    target_tokens = utils.strip_pad(sample['target_trans'][i, :], tgt_dict.pad()).int().cpu()
 
                 # Either retrieve the original sentences or regenerate them from tokens.
                 if align_dict is not None:
