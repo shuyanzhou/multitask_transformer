@@ -20,6 +20,7 @@ def retrieve_noisy_clean_outs(hypos, noisy_encoder_out, beam_size, max_len):
     all_outs = []
     all_clean_scores = []
     _, batch_size, embed_size = noisy_encoder_out['encoder_out'].shape
+    device = noisy_encoder_out['encoder_out'].device
     for beam_idx in range(beam_size):
         clean_decoder_tensor = torch.zeros((batch_size, max_len, embed_size))
         clean_decoder_padding_mask = torch.ones((batch_size, max_len)).byte()
@@ -35,6 +36,9 @@ def retrieve_noisy_clean_outs(hypos, noisy_encoder_out, beam_size, max_len):
         clean_decoder_tensor = torch.transpose(clean_decoder_tensor, 1, 0)
         if not clean_decoder_padding_mask.any():
             clean_decoder_padding_mask = None
+        clean_scores = clean_scores.to(device)
+        clean_decoder_tensor = clean_decoder_tensor.to(device)
+        clean_decoder_padding_mask = clean_decoder_padding_mask.to(device)
         all_clean_scores.append(clean_scores)
         cur_clean_decoder_out = {
             'decoder_out': clean_decoder_tensor,
