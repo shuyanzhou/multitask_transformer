@@ -53,7 +53,18 @@ def update_scores(translate_hypo, clean_scores:torch.Tensor, p=0.5):
     for idx, sentence_hypo in enumerate(translate_hypo):
         for beam_hypo in sentence_hypo:
             beam_hypo["score"] = p * beam_hypo["score"] + (1 - p) * clean_scores[idx]
+            beam_hypo["beam_idx"] = idx
 
+
+def merge_hypos(hypos):
+    result_hypos = []
+    for h in zip(*hypos):
+        cur_hypo = [y for x in h for y in x]
+        cur_hypo.sort(key=lambda x: x["score"], reverse=True)
+        result_hypos.append(cur_hypo)
+    assert len(result_hypos) == len(hypos[0])
+    assert len(result_hypos[0]) == len(hypos)
+    return result_hypos
 
 def main(args):
     assert args.path is not None, '--path required for generation!'
@@ -144,19 +155,21 @@ def main(args):
             gen_timer.start()
             # noisy_encoder_out is a dictionary
             hypos, noisy_encoder_out, max_len = task.inference_step(generator, models, sample, prefix_tokens)
+            clean_hypos = copy.deepcopy(hypos)
             # all_clean_scores: a list of length beam_size, each with batch_size length
             all_clean_scores, all_outs = \
                 retrieve_noisy_clean_outs(hypos, noisy_encoder_out, args.beam, max_len)
-            all_hypos = []
+            translation_hypos = []
             for beam_idx in range(args.beam):
-                translate_hypos, _, _ = task.inference_step(generator, models, sample=None, prefix_tokens=prefix_tokens,
+                cur_beam_translation_hypo, _, _ = task.inference_step(generator, models, sample=None, prefix_tokens=prefix_tokens,
                                                       bos_token=None, is_translation=True,
                                                       noisy_clean_outs=all_outs[beam_idx])
                 # combine noisy - clean and noisy.clean - translate together
-                update_scores(translate_hypos, all_clean_scores[beam_idx])
-                all_hypos += translate_hypos
-            hypos = all_hypos
-
+                update_scores(cur_beam_translation_hypo, all_clean_scores[beam_idx])
+                translation_hypos += cur_beam_translation_hypo
+            translation_hypos = merge_hypos(translation_hypos)
+            hypos = translation_hypos
+            
             num_generated_tokens = sum(len(h[0]['tokens']) for h in hypos)
             gen_timer.stop(num_generated_tokens)
 
@@ -197,6 +210,16 @@ def main(args):
                         remove_bpe=args.remove_bpe,
                     )
 
+                    cur_clean_hypo = clean_hypos[i][hypo["beam_idx"]]
+                    clean_tokens, clean_str, clean_alignment = utils.post_process_prediction(
+                        hypo_tokens=cur_clean_hypo["tokens"].int().cpu(),
+                        src_str=src_str,
+                        alignment=cur_clean_hypo["alignment"].int().cpu() if cur_clean_hypo["alignment"] is not None else None,
+                        align_dict=align_dict,
+                        tgt_dict=src_dict,
+                        remove_bpe=args.remove_bpe
+                    )
+
                     if not args.quiet:
                         print('H-{}\t{}\t{}'.format(sample_id, hypo['score'], hypo_str))
                         print('P-{}\t{}'.format(
@@ -206,6 +229,7 @@ def main(args):
                                 hypo['positional_scores'].tolist(),
                             ))
                         ))
+                        print("C-{}\t".format(sample_id, cur_clean_hypo["score"], clean_str))
 
                         if args.print_alignment:
                             print('A-{}\t{}'.format(
