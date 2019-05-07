@@ -49,11 +49,11 @@ def retrieve_noisy_clean_outs(hypos, noisy_encoder_out, beam_size, max_len):
     return all_clean_scores, all_outs
 
 
-def update_scores(translate_hypo, clean_scores:torch.Tensor, p=0.5):
+def update_scores(translate_hypo, clean_scores:torch.Tensor, beam_idx, p=0.5):
     for idx, sentence_hypo in enumerate(translate_hypo):
         for beam_hypo in sentence_hypo:
             beam_hypo["score"] = p * beam_hypo["score"] + (1 - p) * clean_scores[idx]
-            beam_hypo["beam_idx"] = idx
+            beam_hypo["beam_idx"] = beam_idx
 
 
 def merge_hypos(hypos):
@@ -63,7 +63,7 @@ def merge_hypos(hypos):
         cur_hypo.sort(key=lambda x: x["score"], reverse=True)
         result_hypos.append(cur_hypo)
     assert len(result_hypos) == len(hypos[0])
-    assert len(result_hypos[0]) == len(hypos)
+    assert len(result_hypos[0]) == len(hypos) * len(hypos)
     return result_hypos
 
 def main(args):
@@ -165,8 +165,8 @@ def main(args):
                                                       bos_token=None, is_translation=True,
                                                       noisy_clean_outs=all_outs[beam_idx])
                 # combine noisy - clean and noisy.clean - translate together
-                update_scores(cur_beam_translation_hypo, all_clean_scores[beam_idx])
-                translation_hypos += cur_beam_translation_hypo
+                update_scores(cur_beam_translation_hypo, all_clean_scores[beam_idx], beam_idx)
+                translation_hypos.append(cur_beam_translation_hypo)
             translation_hypos = merge_hypos(translation_hypos)
             hypos = translation_hypos
             
@@ -200,7 +200,7 @@ def main(args):
                         print('T-{}\t{}'.format(sample_id, target_str))
 
                 # Process top predictions
-                for i, hypo in enumerate(hypos[i][:min(len(hypos), args.nbest)]):
+                for j, hypo in enumerate(hypos[i][:min(len(hypos), args.nbest)]):
                     hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
                         hypo_tokens=hypo['tokens'].int().cpu(),
                         src_str=src_str,
@@ -210,7 +210,7 @@ def main(args):
                         remove_bpe=args.remove_bpe,
                     )
 
-                    cur_clean_hypo = clean_hypos[i][hypo["beam_idx"]]
+                    cur_clean_hypo = clean_hypos[j][hypo["beam_idx"]]
                     clean_tokens, clean_str, clean_alignment = utils.post_process_prediction(
                         hypo_tokens=cur_clean_hypo["tokens"].int().cpu(),
                         src_str=src_str,
@@ -229,7 +229,7 @@ def main(args):
                                 hypo['positional_scores'].tolist(),
                             ))
                         ))
-                        print("C-{}\t".format(sample_id, cur_clean_hypo["score"], clean_str))
+                        print("C-{}\t{}\t{}".format(sample_id, cur_clean_hypo["score"], clean_str))
 
                         if args.print_alignment:
                             print('A-{}\t{}'.format(
@@ -238,7 +238,7 @@ def main(args):
                             ))
 
                     # Score only the top hypothesis
-                    if has_target and i == 0:
+                    if has_target and j == 0:
                         if align_dict is not None or args.remove_bpe is not None:
                             # Convert back to tokens for evaluation with unk replacement and/or without BPE
                             target_tokens = tgt_dict.encode_line(target_str, add_if_not_exist=True)
