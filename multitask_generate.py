@@ -1,4 +1,5 @@
 #!/usr/bin/env python3 -u
+#!/usr/bin/env python3 -u
 # Copyright (c) 2017-present, Facebook, Inc.
 # All rights reserved.
 #
@@ -49,7 +50,7 @@ def retrieve_noisy_clean_outs(hypos, noisy_encoder_out, beam_size, max_len):
     return all_clean_scores, all_outs
 
 
-def update_scores(translate_hypo, clean_scores:torch.Tensor, beam_idx, p=0.5):
+def update_scores(translate_hypo, clean_scores:torch.Tensor, beam_idx, p=0.95):
     for idx, sentence_hypo in enumerate(translate_hypo):
         for beam_hypo in sentence_hypo:
             beam_hypo["score"] = p * beam_hypo["score"] + (1 - p) * clean_scores[idx]
@@ -154,11 +155,10 @@ def main(args):
 
             gen_timer.start()
             # noisy_encoder_out is a dictionary
-            hypos, noisy_encoder_out, max_len = task.inference_step(generator, models, sample, prefix_tokens)
-            clean_hypos = copy.deepcopy(hypos)
+            clean_hypos, noisy_encoder_out, max_len = task.inference_step(generator, models, sample, prefix_tokens)
             # all_clean_scores: a list of length beam_size, each with batch_size length
             all_clean_scores, all_outs = \
-                retrieve_noisy_clean_outs(hypos, noisy_encoder_out, args.beam, max_len)
+                retrieve_noisy_clean_outs(clean_hypos, noisy_encoder_out, args.beam, max_len)
             translation_hypos = []
             for beam_idx in range(args.beam):
                 cur_beam_translation_hypo, _, _ = task.inference_step(generator, models, sample=None, prefix_tokens=prefix_tokens,
@@ -210,7 +210,7 @@ def main(args):
                         remove_bpe=args.remove_bpe,
                     )
 
-                    cur_clean_hypo = clean_hypos[j][hypo["beam_idx"]]
+                    cur_clean_hypo = clean_hypos[i][hypo["beam_idx"]]
                     clean_tokens, clean_str, clean_alignment = utils.post_process_prediction(
                         hypo_tokens=cur_clean_hypo["tokens"].int().cpu(),
                         src_str=src_str,
@@ -221,15 +221,15 @@ def main(args):
                     )
 
                     if not args.quiet:
-                        print('H-{}\t{}\t{}'.format(sample_id, hypo['score'], hypo_str))
-                        print('P-{}\t{}'.format(
-                            sample_id,
-                            ' '.join(map(
-                                lambda x: '{:.4f}'.format(x),
-                                hypo['positional_scores'].tolist(),
-                            ))
-                        ))
                         print("C-{}\t{}\t{}".format(sample_id, cur_clean_hypo["score"], clean_str))
+                        print('H-{}\t{}\t{}'.format(sample_id, hypo['score'], hypo_str))
+                        # print('P-{}\t{}'.format(
+                        #     sample_id,
+                        #     ' '.join(map(
+                        #         lambda x: '{:.4f}'.format(x),
+                        #         hypo['positional_scores'].tolist(),
+                        #     ))
+                        # ))
 
                         if args.print_alignment:
                             print('A-{}\t{}'.format(
